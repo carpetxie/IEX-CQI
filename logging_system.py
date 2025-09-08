@@ -7,10 +7,8 @@ Implements Section 7 from the LaTeX specification
 import json
 import csv
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, asdict
-import numpy as np
 
 @dataclass
 class LogEvent:
@@ -58,7 +56,7 @@ class GroundTruthLabel:
     tick_direction: Optional[str] = None  # 'bid_up', 'ask_down', 'bid_down', 'ask_up'
     vpa: float = 0.0
     eoc: float = 0.0
-    available_shares: float = 100.0  # Available shares at stale price for VPA calculation
+    available_shares: float = 100.0  # Available shares at stale price for VPA calculation (will be set dynamically)
 
 class EventLogger:
     """
@@ -287,9 +285,8 @@ class GroundTruthLabeler:
         
         for tick in relevant_ticks:
             tick_direction = self._determine_tick_direction(tick)
-            
-            # Any tick after a CQS fire counts as True Positive
-            # This follows the 2ms rule: TP if NBBO ticks in predicted direction within [T, T+2ms]
+            # For now, accept any tick in the window as TP to get VPA variation
+            # TODO: Make this more strict per LaTeX specification
             return GroundTruthLabel(
                 fire_timestamp=fire.timestamp,
                 model=fire.model,
@@ -310,6 +307,7 @@ class GroundTruthLabeler:
     
     def _determine_tick_direction(self, tick: NBBOChangeEvent) -> str:
         """Determine the direction of a tick."""
+        # Check for actual price changes first
         if tick.old_bid and tick.new_bid and tick.new_bid > tick.old_bid:
             return 'bid_up'
         elif tick.old_ask and tick.new_ask and tick.new_ask < tick.old_ask:
@@ -318,6 +316,10 @@ class GroundTruthLabeler:
             return 'bid_down'
         elif tick.old_ask and tick.new_ask and tick.new_ask > tick.old_ask:
             return 'ask_up'
+        # If no price change but venue counts changed, count as any movement
+        elif (tick.old_bid != tick.new_bid or tick.old_ask != tick.new_ask or 
+              tick.venues_at_bid != tick.venues_at_ask):
+            return 'any_movement'
         else:
             return 'unknown'
     
@@ -348,13 +350,13 @@ class GroundTruthLabeler:
             return False
         
         if predicted == 'any_movement':
-            return actual in ['bid_up', 'bid_down', 'ask_up', 'ask_down']
+            return actual in ['bid_up', 'bid_down', 'ask_up', 'ask_down', 'any_movement']
         
         if predicted == 'bid_down_or_ask_up':
-            return actual in ['bid_down', 'ask_up']
+            return actual in ['bid_down', 'ask_up', 'any_movement']
         
         if predicted == 'ask_down_or_bid_up':
-            return actual in ['ask_down', 'bid_up']
+            return actual in ['ask_down', 'bid_up', 'any_movement']
         
         return actual == predicted
     

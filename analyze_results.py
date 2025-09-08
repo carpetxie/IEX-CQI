@@ -69,6 +69,7 @@ class ResultsAnalyzer:
         vpa_stds = []
         eoc_stds = []
         
+        group_sizes = []
         for threshold in thresholds:
             metrics_list = threshold_groups[threshold]
             vpa_values = [m['vpa'] for m in metrics_list]
@@ -78,11 +79,11 @@ class ResultsAnalyzer:
             eoc_means.append(np.mean(eoc_values))
             vpa_stds.append(np.std(vpa_values))
             eoc_stds.append(np.std(eoc_values))
+            group_sizes.append(max(1, len(metrics_list)))
         
         # Calculate 95% confidence intervals (mean ± 1.96 × SE)
-        n_runs = len(self.primary_data) if self.primary_data else 1
-        vpa_cis = 1.96 * np.array(vpa_stds) / np.sqrt(n_runs)
-        eoc_cis = 1.96 * np.array(eoc_stds) / np.sqrt(n_runs)
+        vpa_cis = 1.96 * np.array(vpa_stds) / np.sqrt(np.array(group_sizes))
+        eoc_cis = 1.96 * np.array(eoc_stds) / np.sqrt(np.array(group_sizes))
         
         # Plot efficient frontier with 95% confidence intervals
         plt.errorbar(eoc_means, vpa_means, 

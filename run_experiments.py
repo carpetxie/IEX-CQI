@@ -7,9 +7,8 @@ Implements Section 9 from the LaTeX specification
 import json
 import csv
 import numpy as np
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 from dataclasses import asdict
-import time
 import os
 from datetime import datetime
 
@@ -96,6 +95,11 @@ class ExperimentRunner:
             iex.add_symbol(symbol, Decimal('0.01'))
             exchange_a.add_symbol(symbol, Decimal('0.01'))
             exchange_b.add_symbol(symbol, Decimal('0.01'))
+        
+        # Apply pegged fraction φ on IEX per config (default 0.4)
+        pegged_fraction = float(config.get('pegged_fraction', 0.4))
+        for ob in iex.order_books.values():
+            ob.set_pegged_fraction(pegged_fraction)
         
 # latency_model already created above
         

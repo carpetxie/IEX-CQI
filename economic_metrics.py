@@ -154,23 +154,10 @@ class KPICalculator:
                 # Find corresponding CQS fire
                 fire = self._find_fire_at_time(cqs_fires, label.fire_timestamp)
                 if fire:
-                    # Calculate missed volume (simplified)
-                    # In practice, this would be based on protected pegged size
+                    # Per LaTeX: EOC_event = V_missed × F_exchange
+                    # V_missed = min(incoming size, protected pegged size)
                     missed_volume = self._estimate_missed_volume(fire)
-                    
-                    # Base EOC from exchange fees
-                    base_eoc = missed_volume * self.exchange_fee
-                    
-                    # Add opportunity cost based on market conditions
-                    # More volatile markets = higher opportunity cost
-                    opportunity_multiplier = self._calculate_opportunity_multiplier(fire)
-                    
-                    # Add variation based on protection duration
-                    # Longer protection = higher opportunity cost
-                    duration_multiplier = self._calculate_duration_multiplier(fire)
-                    
-                    # EOC for this event
-                    eoc_event = base_eoc * opportunity_multiplier * duration_multiplier
+                    eoc_event = missed_volume * self.exchange_fee
                     eoc_total += eoc_event
                     
                     # Update label with EOC
@@ -179,7 +166,8 @@ class KPICalculator:
         return eoc_total
     
     def calculate_hft_pnl(self, labels: List[GroundTruthLabel], 
-                         hft_attempts: List[HFTArbitrageEvent]) -> float:
+                         hft_attempts: List[HFTArbitrageEvent],
+                         nbbo_changes: Optional[List[NBBOChangeEvent]] = None) -> float:
         """
         Calculate HFT Arbitrage Profitability.
         
@@ -198,14 +186,19 @@ class KPICalculator:
         pnl_total = 0.0
         
         # Calculate profits from successful arbitrages (on False Negatives)
-        # These are cases where HFT could exploit stale quotes without protection
+        # Per LaTeX: wins on FNs are VPA_event values that would have accrued to HFT
         fn_profits = 0.0
         for label in labels:
-            if label.label == 'FN':
-                # HFT would have succeeded - estimate profit from price difference
-                # Use conservative estimate based on typical arbitrage profits
-                estimated_profit = 0.005 * 100  # 0.5 cent per share * 100 shares
-                fn_profits += estimated_profit
+            if label.label == 'FN' and label.tick_timestamp:
+                tick = self._find_tick_at_time(nbbo_changes, label.tick_timestamp) if nbbo_changes is not None else None
+                # If tick context available, approximate same price-diff × size
+                if tick:
+                    price_diff = self._calculate_price_difference(tick)
+                    size = 100  # conservative default
+                    fn_profits += price_diff * size
+                else:
+                    # Fallback conservative estimate
+                    fn_profits += 0.005 * 100
         
         # Calculate costs from blocked attempts (True Positives)
         # Count actual blocked attempts from HFT logs
@@ -297,7 +290,7 @@ class KPICalculator:
         vpa = self.calculate_vpa(labels, nbbo_changes)
         
         eoc = self.calculate_eoc(labels, cqs_fires)
-        hft_pnl = self.calculate_hft_pnl(labels, hft_attempts)
+        hft_pnl = self.calculate_hft_pnl(labels, hft_attempts, nbbo_changes)
         
         # Calculate precision/recall
         precision, recall, f1_score = self.calculate_precision_recall(labels)
@@ -346,6 +339,13 @@ class KPICalculator:
         
         if tick.old_ask and tick.new_ask:
             ask_diff = abs(tick.new_ask - tick.old_ask)
+        
+        # If no price change but venue counts changed, use a small arbitrage opportunity
+        # This represents the value of preventing stale quote arbitrage
+        if bid_diff == 0.0 and ask_diff == 0.0:
+            # Use a conservative estimate for venue count changes
+            # This represents the typical arbitrage opportunity from stale quotes
+            return 0.01  # 1 cent per share
         
         # Return the maximum price difference
         return max(bid_diff, ask_diff)

@@ -8,7 +8,7 @@ import random
 import numpy as np
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
-from simulator import Simulator, OrderEvent, MarketDataEvent
+from simulator import Simulator
 from market_environment import Exchange
 from latency_model import LatencyModel
 
@@ -347,10 +347,8 @@ class HFTAgent:
         bid_price_same = current_nbb == previous_nbb if (current_nbb is not None and previous_nbb is not None) else False
         ask_price_same = current_nbo == previous_nbo if (current_nbo is not None and previous_nbo is not None) else False
         
-        # Also check for any decrease in venue count (more aggressive)
-        any_decrease = (current['bids'] < previous['bids']) or (current['asks'] < previous['asks'])
-        
-        return (bids_decreased and bid_price_same) or (asks_decreased and ask_price_same) or any_decrease
+        # Per LaTeX heuristic: fire only when venues drop WITH price unchanged
+        return (bids_decreased and bid_price_same) or (asks_decreased and ask_price_same)
     
     def _execute_arbitrage(self, symbol: str):
         """Execute arbitrage when vulnerable state detected."""
