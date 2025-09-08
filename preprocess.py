@@ -84,12 +84,12 @@ def process_atomic_events(pcap_file_path: str, sample_rate: int = 100, max_bundl
                     # This is a simplification - in practice, you'd check the actual flag bits
                     pass
                 
-                # Stop if we've reached max bundles
-                if yielded_bundles >= max_bundles:
+                # Stop if we've reached max bundles (unless unlimited)
+                if max_bundles != float('inf') and yielded_bundles >= max_bundles:
                     break
         
         # Yield the final bundle if it exists
-        if current_bundle and yielded_bundles < max_bundles:
+        if current_bundle and (max_bundles == float('inf') or yielded_bundles < max_bundles):
             bundle_count += 1
             if bundle_count >= start_bundle and bundle_count % sample_rate == 0:
                 yield current_bundle

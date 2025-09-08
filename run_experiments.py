@@ -23,6 +23,18 @@ from logging_system import EventLogger, GroundTruthLabeler
 from economic_metrics import KPICalculator, MetricsAnalyzer, KPIMetrics
 from decimal import Decimal
 
+def load_calibrated_parameters() -> Optional[Dict[str, Any]]:
+    """Load calibrated parameters from file if available."""
+    try:
+        with open('calibrated_parameters.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print("Warning: calibrated_parameters.json not found, using defaults")
+        return None
+    except Exception as e:
+        print(f"Warning: Error loading calibrated parameters: {e}")
+        return None
+
 class ExperimentRunner:
     """
     Main experiment runner for the CQS simulation.
@@ -65,10 +77,17 @@ class ExperimentRunner:
         # Create simulation environment
         sim = Simulator(max_time=config.get('max_time', 60.0))  # Increased to 60 seconds
         
-        # Create exchanges
-        iex = Exchange("IEX", sim)
-        exchange_a = Exchange("A", sim)
-        exchange_b = Exchange("B", sim)
+        # Create latency model first
+        regime = LatencyRegime[config.get('latency_regime', 'MEDIUM')]
+        latency_model = LatencyModel(regime=regime, seed=config.get('seed', 42))
+        
+        # Agent IDs for latency routing
+        agent_ids = ["LP1", "HFT1"]
+        
+        # Create exchanges with latency model and agent list
+        iex = Exchange("IEX", sim, latency_model, agent_ids)
+        exchange_a = Exchange("A", sim, latency_model, agent_ids)
+        exchange_b = Exchange("B", sim, latency_model, agent_ids)
         exchanges = [iex, exchange_a, exchange_b]
         
         # Add symbols
@@ -78,9 +97,7 @@ class ExperimentRunner:
             exchange_a.add_symbol(symbol, Decimal('0.01'))
             exchange_b.add_symbol(symbol, Decimal('0.01'))
         
-        # Create latency model
-        regime = LatencyRegime[config.get('latency_regime', 'MEDIUM')]
-        latency_model = LatencyModel(regime=regime, seed=config.get('seed', 42))
+# latency_model already created above
         
         # Create CQS Manager
         venues = ["IEX", "A", "B"]
@@ -103,26 +120,43 @@ class ExperimentRunner:
         
         # Connect Signal Agent to CQS Manager
         signal_agent.cqs_manager = cqs_manager
+        # Attach logger to CQS Manager for centralized fire logging
+        cqs_manager.logger = logger
+        
+        # Load calibrated parameters if available
+        calibrated_params = load_calibrated_parameters()
         
         # Create event generator manager with proper seed
         event_manager = EventGeneratorManager(sim, exchanges, latency_model, seed=config.get('seed', 42))
         
-        # Setup Hawkes generators (increased rates for more activity)
-        bid_params = config.get('hawkes_bid', {'mu': 2.0, 'alpha': 1.0, 'beta': 2.0, 'mixture_proportion': 0.6})
-        ask_params = config.get('hawkes_ask', {'mu': 1.8, 'alpha': 0.9, 'beta': 1.8, 'mixture_proportion': 0.5})
+        # Setup Hawkes generators using calibrated params if available
+        if calibrated_params:
+            bid_params = calibrated_params['hawkes_params']['bid']
+            ask_params = calibrated_params['hawkes_params']['ask']
+        else:
+            # Fallback to config or defaults
+            bid_params = config.get('hawkes_bid', {'mu': 2.0, 'alpha': 1.0, 'beta': 2.0, 'mixture_proportion': 0.6})
+            ask_params = config.get('hawkes_ask', {'mu': 1.8, 'alpha': 0.9, 'beta': 1.8, 'mixture_proportion': 0.5})
+        
         event_manager.setup_hawkes_generators(bid_params, ask_params)
         
-        # Setup Poisson generator (increased rates for more activity)
-        rates = config.get('poisson_rates', {
-            "0-60": 10.0,    # 10 events per minute
-            "60-120": 8.0,   # 8 events per minute
-            "120-180": 12.0  # 12 events per minute
-        })
-        size_histogram = config.get('size_histogram', {
-            "100": 10,
-            "200": 15,
-            "500": 5
-        })
+        # Setup Poisson generator using calibrated params if available
+        if calibrated_params:
+            rates = calibrated_params['poisson_params']['rates']
+            size_histogram = calibrated_params['addition_histogram']
+        else:
+            # Fallback to config or defaults
+            rates = config.get('poisson_rates', {
+                "0-60": 10.0,    # 10 events per minute
+                "60-120": 8.0,   # 8 events per minute
+                "120-180": 12.0  # 12 events per minute
+            })
+            size_histogram = config.get('size_histogram', {
+                "100": 10,
+                "200": 15,
+                "500": 5
+            })
+        
         event_manager.setup_poisson_generator(rates, size_histogram)
         
         # Create agents with proper seeds
@@ -435,11 +469,11 @@ def main():
     
     # Run primary experiment
     print("\nStarting Primary Experiment...")
-    primary_results = runner.run_primary_experiment(num_runs=10)  # Reduced for testing
+    primary_results = runner.run_primary_experiment(num_runs=100)  # As specified in LaTeX
     
     # Run secondary experiment
     print("\nStarting Secondary Experiment...")
-    secondary_results = runner.run_secondary_experiment(num_runs=5)  # Reduced for testing
+    secondary_results = runner.run_secondary_experiment(num_runs=100)  # As specified in LaTeX
     
     # Generate analysis report
     print("\nGenerating Analysis Report...")

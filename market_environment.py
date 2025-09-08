@@ -229,9 +229,11 @@ class Exchange:
     Each exchange maintains a limit order book and handles order processing.
     """
     
-    def __init__(self, name: str, simulator: Simulator):
+    def __init__(self, name: str, simulator: Simulator, latency_model=None, agents=None):
         self.name = name
         self.simulator = simulator
+        self.latency_model = latency_model
+        self.agents = agents or []  # List of agent IDs to deliver data to
         self.order_books = {}  # symbol -> LimitOrderBook
         self.tick_size = Decimal('0.01')  # Default tick size
         
@@ -314,8 +316,14 @@ class Exchange:
             side = order.get('side')
             price = Decimal(str(order.get('price', 0)))
             size = order.get('size', 0)
+            agent_id = order.get('agent_id')
             
-            filled_size, fills = order_book.match_order(side, price, size)
+            # Enforce protection only on IEX
+            is_signal_active = False
+            if self.name == "IEX":
+                is_signal_active = any(ob.is_signal_active for ob in self.order_books.values())
+            
+            filled_size, fills = order_book.match_order(side, price, size, is_signal_active=is_signal_active)
             
             # Publish market data events for fills
             for fill in fills:
@@ -326,6 +334,25 @@ class Exchange:
                     'size': fill['size'],
                     'side': fill['side']
                 })
+            
+            # If this was an HFT arbitrage order, log success/blocked
+            if order.get('is_arbitrage') and agent_id:
+                success = filled_size > 0
+                pnl = 0.0
+                event_data = {
+                    'agent_id': agent_id,
+                    'symbol': symbol,
+                    'side': side,
+                    'price': float(price),
+                    'size': filled_size if success else size,
+                    'success': success,
+                    'pnl': pnl
+                }
+                self.simulator.schedule_event_at(
+                    self.simulator.get_current_time(),
+                    "hft_arbitrage",
+                    event_data
+                )
         
         # Publish market data event for book update
         self.publish_market_data({
@@ -498,23 +525,48 @@ class Exchange:
         }
     
     def publish_market_data(self, data: Dict[str, Any]):
-        """Publish market data events to the simulator."""
+        """Publish market data events to the simulator with proper latency."""
         # Add venue information to the data
         data['venue'] = self.name
+        current_time = self.simulator.get_current_time()
         
-        # Schedule market data event
-        self.simulator.schedule_event_at(
-            self.simulator.get_current_time(),
-            "market_data",
-            data
-        )
+        if self.latency_model and self.agents:
+            # Deliver to each agent with individual data latency
+            for agent_id in self.agents:
+                data_latency = self.latency_model.get_data_latency(self.name, agent_id)
+                arrival_time = current_time + data_latency
+                
+                # Create agent-specific market data event
+                agent_data = data.copy()
+                agent_data['recipient'] = agent_id
+                
+                self.simulator.schedule_event_at(
+                    arrival_time,
+                    "market_data",
+                    agent_data
+                )
+                
+                # Also schedule book_update event for compatibility
+                self.simulator.schedule_event_at(
+                    arrival_time,
+                    "book_update", 
+                    agent_data
+                )
+        else:
+            # Fallback to immediate delivery (for backward compatibility)
+            self.simulator.schedule_event_at(
+                current_time,
+                "market_data",
+                data
+            )
+            
+            self.simulator.schedule_event_at(
+                current_time,
+                "book_update",
+                data
+            )
         
-        # Also schedule book_update event for compatibility
-        self.simulator.schedule_event_at(
-            self.simulator.get_current_time(),
-            "book_update",
-            data
-        )
+# Removed ground truth state change - using original market_data approach
 
 if __name__ == "__main__":
     # Test the market environment

@@ -79,9 +79,14 @@ class ResultsAnalyzer:
             vpa_stds.append(np.std(vpa_values))
             eoc_stds.append(np.std(eoc_values))
         
-        # Plot efficient frontier
+        # Calculate 95% confidence intervals (mean ± 1.96 × SE)
+        n_runs = len(self.primary_data) if self.primary_data else 1
+        vpa_cis = 1.96 * np.array(vpa_stds) / np.sqrt(n_runs)
+        eoc_cis = 1.96 * np.array(eoc_stds) / np.sqrt(n_runs)
+        
+        # Plot efficient frontier with 95% confidence intervals
         plt.errorbar(eoc_means, vpa_means, 
-                    xerr=eoc_stds, yerr=vpa_stds,
+                    xerr=eoc_cis, yerr=vpa_cis,
                     fmt='o-', capsize=5, capthick=2,
                     label='Logistic Model', linewidth=2, markersize=8)
         
@@ -115,7 +120,7 @@ class ResultsAnalyzer:
         
         # Save plot
         plt.savefig(f"{self.results_dir}/{output_file}", dpi=300, bbox_inches='tight')
-        plt.show()
+        plt.close()
         
         print(f"Efficient frontier plot saved to {output_file}")
     
@@ -213,7 +218,8 @@ class ResultsAnalyzer:
         plt.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='Zero P&L')
         
         # Find and plot tipping points
-        for model in models:
+        all_models = ['control', 'heuristic', 'logistic']
+        for model in all_models:
             model_data = self.primary_data.get(model, [])
             if not model_data:
                 continue
@@ -249,7 +255,7 @@ class ResultsAnalyzer:
         
         # Save plot
         plt.savefig(f"{self.results_dir}/{output_file}", dpi=300, bbox_inches='tight')
-        plt.show()
+        plt.close()
         
         print(f"HFT tipping point plot saved to {output_file}")
     
@@ -381,7 +387,7 @@ class ResultsAnalyzer:
         
         plt.tight_layout()
         plt.savefig(f"{self.results_dir}/{output_file}", dpi=300, bbox_inches='tight')
-        plt.show()
+        plt.close()
         
         print(f"Sensitivity analysis plot saved to {output_file}")
     

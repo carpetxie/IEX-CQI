@@ -81,6 +81,12 @@ class LPAgent:
     def handle_market_data(self, event):
         """Handle market data updates."""
         data = event.data
+        
+        # Only process data intended for this agent or no specific recipient
+        recipient = data.get('recipient')
+        if recipient and recipient != self.agent_id:
+            return
+        
         symbol = data.get('symbol')
         
         if symbol:
@@ -129,7 +135,8 @@ class LPAgent:
             'side': side,
             'price': float(price),
             'size': size,
-            'is_pegged': random.random() < 0.5  # 50% chance of being pegged
+            'is_pegged': random.random() < 0.5,  # 50% chance of being pegged
+            'venue': target_exchange
         }
         
         # Schedule order event
@@ -208,6 +215,12 @@ class HFTAgent:
     def handle_market_data(self, event):
         """Handle market data updates."""
         data = event.data
+        
+        # Only process data intended for this agent or no specific recipient
+        recipient = data.get('recipient')
+        if recipient and recipient != self.agent_id:
+            return
+        
         symbol = data.get('symbol')
         venue = data.get('venue')
         bbo = data.get('bbo', {})
@@ -381,7 +394,9 @@ class HFTAgent:
             'side': side,
             'price': target_price,
             'size': order_size,
-            'is_arbitrage': True
+            'is_arbitrage': True,
+            'venue': stale_venue,
+            'agent_id': self.agent_id
         }
         
         # Schedule order event
@@ -412,13 +427,7 @@ class HFTAgent:
             else:
                 potential_pnl = 0.0
         
-        # Log HFT arbitrage attempt
-        if self.logger:
-            current_time = self.simulator.get_current_time()
-            self.logger.log_hft_arbitrage(
-                current_time, self.agent_id, symbol, side, 
-                float(target_price), order_size, True, potential_pnl
-            )
+        # Result (success/blocked) will be logged by the exchange upon execution
         
     
     def _find_stale_venue(self, symbol: str, features: Dict[str, Any]) -> Optional[str]:

@@ -13,14 +13,14 @@ import numpy as np
 from preprocess import process_atomic_events
 from orderbook import OrderBook
 
-def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: int = 10000) -> Dict[str, Any]:
+def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: int = None) -> Dict[str, Any]:
     """
     Calibrate Hawkes and Poisson models from real IEX DEEP data.
     
     Args:
         pcap_file: Path to the .pcap.gz file
         sample_rate: Sampling rate (1 = all data, 100 = 1/100th)
-        max_bundles: Maximum number of bundles to process
+        max_bundles: Maximum number of bundles to process (None = process all)
         
     Returns:
         Dictionary with calibrated parameters
@@ -31,7 +31,10 @@ def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: 
     
     # Process atomic events from real data
     print(f"Processing atomic events from {pcap_file}...")
-    print(f"Sample rate: {sample_rate}, Max bundles: {max_bundles}")
+    if max_bundles is None:
+        print(f"Sample rate: {sample_rate}, Processing ALL bundles")
+    else:
+        print(f"Sample rate: {sample_rate}, Max bundles: {max_bundles}")
     
     # Track order book states per symbol
     symbol_books = {}
@@ -45,7 +48,9 @@ def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: 
     processed_bundles = 0
     
     try:
-        for bundle in process_atomic_events(pcap_file, sample_rate=sample_rate, max_bundles=max_bundles):
+        # Process with unlimited bundles if max_bundles is None
+        bundle_limit = max_bundles if max_bundles is not None else float('inf')
+        for bundle in process_atomic_events(pcap_file, sample_rate=sample_rate, max_bundles=bundle_limit):
             bundle_count += 1
             if bundle_count % 1000 == 0:
                 print(f"Processed {bundle_count} bundles...")
@@ -133,7 +138,7 @@ def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: 
                                         addition_sizes.append(bbo[3] - prev_state['ask_size'])
             
             processed_bundles += 1
-            if processed_bundles >= max_bundles:
+            if max_bundles is not None and processed_bundles >= max_bundles:
                 break
                 
     except Exception as e:
@@ -180,10 +185,19 @@ def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: 
     save_events_to_csv(hawkes_events, 'hawkes_depletions.csv')
     save_events_to_csv(poisson_events, 'poisson_additions.csv')
     
+    # Save size histograms as separate JSON files (required by LaTeX spec)
+    with open('addition_size_histogram.json', 'w') as f:
+        json.dump(addition_histogram, f, indent=2)
+    
+    with open('depletion_size_histogram.json', 'w') as f:
+        json.dump(depletion_histogram, f, indent=2)
+    
     print(f"\nCalibration complete! Results saved to:")
     print(f"  - calibrated_parameters.json")
     print(f"  - hawkes_depletions.csv")
     print(f"  - poisson_additions.csv")
+    print(f"  - addition_size_histogram.json")
+    print(f"  - depletion_size_histogram.json")
     
     return calibration_data
 
@@ -311,8 +325,8 @@ def save_events_to_csv(events: List[Dict], filename: str):
             ])
 
 if __name__ == "__main__":
-    # Calibrate from real data
-    calibration_data = calibrate_from_real_data('data.pcap.gz', sample_rate=100, max_bundles=5000)
+    # Calibrate from real data - use entire dataset as per LaTeX spec
+    calibration_data = calibrate_from_real_data('data.pcap.gz', sample_rate=1, max_bundles=None)
     
     print("\n" + "=" * 60)
     print("CALIBRATION SUMMARY")

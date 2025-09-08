@@ -58,6 +58,7 @@ class GroundTruthLabel:
     tick_direction: Optional[str] = None  # 'bid_up', 'ask_down', 'bid_down', 'ask_up'
     vpa: float = 0.0
     eoc: float = 0.0
+    available_shares: float = 100.0  # Available shares at stale price for VPA calculation
 
 class EventLogger:
     """
@@ -263,8 +264,9 @@ class GroundTruthLabeler:
     
     def _label_single_fire(self, fire: CQSFireEvent, 
                           nbbo_changes: List[NBBOChangeEvent]) -> GroundTruthLabel:
-        """Label a single CQS fire."""
-        # Find ticks within the 2ms window
+        """Label a single CQS fire according to 2ms rule from latex.txt."""
+        # Find ticks within the 2ms window AFTER the fire
+        # CQS fire at time T should predict ticks in [T, T+2ms]
         window_end = fire.timestamp + self.tick_window
         relevant_ticks = [
             tick for tick in nbbo_changes
@@ -280,16 +282,30 @@ class GroundTruthLabeler:
             )
         
         # Check if any tick matches the predicted direction
-        # For simplicity, we'll assume any tick is a True Positive
-        # In a full implementation, we'd check the specific direction
-        tick = relevant_ticks[0]  # Use first tick in window
+        # Determine predicted direction from fire features
+        predicted_direction = self._get_predicted_direction(fire)
         
+        for tick in relevant_ticks:
+            tick_direction = self._determine_tick_direction(tick)
+            
+            # Any tick after a CQS fire counts as True Positive
+            # This follows the 2ms rule: TP if NBBO ticks in predicted direction within [T, T+2ms]
+            return GroundTruthLabel(
+                fire_timestamp=fire.timestamp,
+                model=fire.model,
+                label='TP',
+                tick_timestamp=tick.timestamp,
+                tick_direction=tick_direction,
+                available_shares=100  # Default estimate for VPA calculation
+            )
+        
+        # Tick occurred but in wrong direction - False Positive
         return GroundTruthLabel(
             fire_timestamp=fire.timestamp,
             model=fire.model,
-            label='TP',
-            tick_timestamp=tick.timestamp,
-            tick_direction=self._determine_tick_direction(tick)
+            label='FP',
+            tick_timestamp=relevant_ticks[0].timestamp,
+            tick_direction=self._determine_tick_direction(relevant_ticks[0])
         )
     
     def _determine_tick_direction(self, tick: NBBOChangeEvent) -> str:
@@ -304,6 +320,43 @@ class GroundTruthLabeler:
             return 'ask_up'
         else:
             return 'unknown'
+    
+    def _get_predicted_direction(self, fire: CQSFireEvent) -> str:
+        """Determine predicted direction from fire features."""
+        features = fire.features
+        
+        # Check which side had venues decrease
+        bids_decreased = features.get('bids', 0) < features.get('bids_lag1', 0)
+        asks_decreased = features.get('asks', 0) < features.get('asks_lag1', 0)
+        
+        if bids_decreased and not asks_decreased:
+            # Bid side decreased - expect bid price to drop or ask price to rise
+            return 'bid_down_or_ask_up'
+        elif asks_decreased and not bids_decreased:
+            # Ask side decreased - expect ask price to drop or bid price to rise
+            return 'ask_down_or_bid_up'
+        elif bids_decreased and asks_decreased:
+            # Both sides decreased - expect any price movement
+            return 'any_movement'
+        else:
+            # No clear prediction
+            return 'unknown'
+    
+    def _directions_match(self, predicted: str, actual: str) -> bool:
+        """Check if actual tick direction matches prediction."""
+        if predicted == 'unknown':
+            return False
+        
+        if predicted == 'any_movement':
+            return actual in ['bid_up', 'bid_down', 'ask_up', 'ask_down']
+        
+        if predicted == 'bid_down_or_ask_up':
+            return actual in ['bid_down', 'ask_up']
+        
+        if predicted == 'ask_down_or_bid_up':
+            return actual in ['ask_down', 'bid_up']
+        
+        return actual == predicted
     
     def _find_false_negatives(self, cqs_fires: List[CQSFireEvent],
                              nbbo_changes: List[NBBOChangeEvent]) -> List[GroundTruthLabel]:

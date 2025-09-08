@@ -49,7 +49,11 @@ class SignalAgent:
             'asks': 0,
             'bids_lag1': 0,
             'asks_lag1': 0,
-            'spread_bucket': 'unknown'
+            'spread_bucket': 'unknown',
+            'nbb': None,
+            'nbo': None,
+            'nbb_lag1': None,
+            'nbo_lag1': None
         }
         
         # Statistics
@@ -62,10 +66,8 @@ class SignalAgent:
         # Set random seed
         np.random.seed(seed)
         
-        # Register event handlers
+        # Register event handlers - only handle market_data to avoid duplicates
         self.simulator.register_handler("market_data", self.handle_market_data)
-        self.simulator.register_handler("book_update", self.handle_market_data)
-        self.simulator.register_handler("state_change", self.handle_state_change)
     
     def handle_market_data(self, event):
         """Handle market data updates from venues."""
@@ -82,14 +84,30 @@ class SignalAgent:
         
         # Recalculate global state
         self._recalculate_global_state(symbol)
+        
+        # Calculate features for this state
+        self._calculate_features(symbol)
+        
+        # Store state in history
+        self._store_state()
+        
+        self.stats['states_processed'] += 1
     
     def handle_state_change(self, event):
         """Handle completed state changes."""
         data = event.data
+        venue = data.get('venue')
         symbol = data.get('symbol')
+        bbo = data.get('bbo', {})
         
-        if not symbol:
+        if not venue or not symbol or not bbo:
             return
+        
+        # Update venue state first
+        self._update_venue_state(venue, symbol, bbo)
+        
+        # Recalculate global state
+        self._recalculate_global_state(symbol)
         
         # Calculate features for this completed state
         self._calculate_features(symbol)
@@ -189,11 +207,15 @@ class SignalAgent:
         # Get lag features from history
         bids_lag1 = 0
         asks_lag1 = 0
+        nbb_lag1 = None
+        nbo_lag1 = None
         
         if len(self.state_history) > 0:
             last_state = self.state_history[-1]
             bids_lag1 = last_state.get('bids', 0)
             asks_lag1 = last_state.get('asks', 0)
+            nbb_lag1 = last_state.get('nbb')
+            nbo_lag1 = last_state.get('nbo')
         
         # Calculate spread bucket
         spread_bucket = self._calculate_spread_bucket()
@@ -204,7 +226,11 @@ class SignalAgent:
             'asks': current_asks,
             'bids_lag1': bids_lag1,
             'asks_lag1': asks_lag1,
-            'spread_bucket': spread_bucket
+            'spread_bucket': spread_bucket,
+            'nbb': self.current_nbbo['bid'],
+            'nbo': self.current_nbbo['ask'],
+            'nbb_lag1': nbb_lag1,
+            'nbo_lag1': nbo_lag1
         }
         
         self.stats['feature_calculations'] += 1
@@ -212,23 +238,11 @@ class SignalAgent:
         # Evaluate CQS models if we have a CQS manager
         if hasattr(self, 'cqs_manager') and self.cqs_manager:
             current_time = self.simulator.get_current_time()
-            should_fire = self.cqs_manager.evaluate_signal(self.current_features, current_time)
-            
-            if should_fire:
-                self.stats['signal_firings'] += 1
-                
-                # Log CQS fire if we have a logger
-                if self.logger:
-                    active_model = self.cqs_manager.active_model
-                    risk_score = None
-                    if active_model == 'logistic':
-                        risk_score = self.cqs_manager.models[active_model].get_risk_score(self.current_features)
-                    
-                    self.logger.log_cqs_fire(
-                        current_time, active_model, self.current_features, risk_score
-                    )
-                
-                # The CQS model will handle firing the signal
+            # Only evaluate if we haven't already evaluated at this timestamp
+            if not hasattr(self, '_last_eval_time') or self._last_eval_time != current_time:
+                self._last_eval_time = current_time
+                # Manager will handle deduplication and scheduling/logging
+                _ = self.cqs_manager.evaluate_signal(self.current_features, current_time)
     
     def _calculate_spread_bucket(self) -> str:
         """Calculate spread bucket category."""
@@ -250,6 +264,8 @@ class SignalAgent:
             'timestamp': self.simulator.get_current_time(),
             'bids': self.current_features['bids'],
             'asks': self.current_features['asks'],
+            'nbb': self.current_features['nbb'],
+            'nbo': self.current_features['nbo'],
             'nbbo': self.current_nbbo.copy()
         }
         
@@ -295,6 +311,11 @@ class CQSModel:
     
     def fire_signal(self, current_time: float, duration: float = 0.002):
         """Fire the CQS signal for the specified duration."""
+        # Debounce: if manager indicates pending/on-window, skip duplicate fires
+        manager = getattr(self, 'manager', None)
+        if manager and (manager.is_signal_active or (manager._pending_activation and current_time <= manager._pending_until)):
+            return
+        
         self.stats['firings'] += 1
         self.stats['total_protection_time'] += duration
         
@@ -348,17 +369,21 @@ class HeuristicModel(CQSModel):
         """Evaluate heuristic firing condition."""
         super().evaluate(features, current_time)
         
-        # Check if venues decreased without price change
+        # Check if venues decreased AND price unchanged (per LaTeX Section 6.2)
         bids_decreased = features['bids'] < features['bids_lag1']
         asks_decreased = features['asks'] < features['asks_lag1']
         
-        # For simplicity, we'll assume price hasn't changed if we have lag data
-        has_lag_data = features['bids_lag1'] > 0 or features['asks_lag1'] > 0
+        # Check if prices are unchanged
+        bid_price_unchanged = (features.get('nbb') == features.get('nbb_lag1') and 
+                              features.get('nbb') is not None and 
+                              features.get('nbb_lag1') is not None)
+        ask_price_unchanged = (features.get('nbo') == features.get('nbo_lag1') and 
+                              features.get('nbo') is not None and 
+                              features.get('nbo_lag1') is not None)
         
-        should_fire = has_lag_data and (bids_decreased or asks_decreased)
-        
-        if should_fire:
-            self.fire_signal(current_time)
+        # Fire if venues decreased without price change on either side
+        should_fire = ((bids_decreased and bid_price_unchanged) or 
+                      (asks_decreased and ask_price_unchanged))
         
         return should_fire
 
@@ -400,9 +425,6 @@ class LogisticModel(CQSModel):
         # Fire if risk score exceeds threshold
         should_fire = p > self.threshold
         
-        if should_fire:
-            self.fire_signal(current_time)
-        
         return should_fire
     
     def get_risk_score(self, features: Dict[str, Any]) -> float:
@@ -430,6 +452,9 @@ class CQSManager:
             'heuristic': HeuristicModel(simulator),
             'logistic': LogisticModel(simulator)
         }
+        # Give models a back-reference to the manager for deduplication
+        for m in self.models.values():
+            setattr(m, 'manager', self)
         
         # Current active model
         self.active_model = 'control'
@@ -437,12 +462,16 @@ class CQSManager:
         # Signal state
         self.is_signal_active = False
         self.signal_start_time = 0.0
+        # Pending activation window to debounce multiple firings at same time
+        self._pending_activation = False
+        self._pending_until = 0.0
         
         # Statistics
         self.stats = {
             'model_evaluations': 0,
             'signal_activations': 0,
             'signal_deactivations': 0,
+            'firings': 0,
             'total_protection_time': 0.0
         }
         
@@ -462,14 +491,51 @@ class CQSManager:
         model = self.models[self.active_model]
         should_fire = model.evaluate(features, current_time)
         
+        if should_fire:
+            # Log the fire
+            if hasattr(self, 'logger') and self.logger:
+                risk_score = None
+                if self.active_model == 'logistic':
+                    risk_score = self.models['logistic'].get_risk_score(features)
+                self.logger.log_cqs_fire(current_time, self.active_model, features, risk_score)
+            
+            # Fire the signal (this handles activation/deactivation)
+            self.fire_signal(current_time)
+        
         self.stats['model_evaluations'] += 1
         return should_fire
+    
+    def fire_signal(self, current_time: float, duration: float = 0.002):
+        """Fire the CQS signal for the specified duration."""
+        # Debounce: if already active or pending, skip
+        if self.is_signal_active or (self._pending_activation and current_time <= self._pending_until):
+            return
+        
+        self.stats['firings'] += 1
+        self.stats['total_protection_time'] += duration
+        
+        # Schedule signal activation
+        self.simulator.schedule_event_at(
+            current_time,
+            "signal_activation",
+            {'model': self.active_model, 'duration': duration}
+        )
+        
+        # Schedule signal deactivation
+        self.simulator.schedule_event_at(
+            current_time + duration,
+            "signal_deactivation",
+            {'model': self.active_model}
+        )
     
     def handle_signal_activation(self, event):
         """Handle signal activation event."""
         self.is_signal_active = True
         self.signal_start_time = event.timestamp
         self.stats['signal_activations'] += 1
+        # Mark pending during the on-window
+        self._pending_activation = True
+        self._pending_until = event.data.get('duration', 0.002) + event.timestamp
         
         print(f"  CQS Signal ACTIVATED at {event.timestamp:.6f}s by {event.data['model']}")
     
@@ -481,6 +547,7 @@ class CQSManager:
             self.stats['signal_deactivations'] += 1
         
         self.is_signal_active = False
+        self._pending_activation = False
         
         print(f"  CQS Signal DEACTIVATED at {event.timestamp:.6f}s")
     
