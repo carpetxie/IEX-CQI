@@ -185,6 +185,7 @@ class SignalAgent:
         new_venues_at_ask = len(venues_at_nbo)
         
         # Log NBBO changes if we have a logger
+        # Log both price AND venue count changes since both CQS and HFT target these events
         if hasattr(self, 'logger') and self.logger:
             if (old_bid != new_bid or old_ask != new_ask or 
                 old_venues_at_bid != new_venues_at_bid or old_venues_at_ask != new_venues_at_ask):
@@ -492,14 +493,19 @@ class CQSManager:
         should_fire = model.evaluate(features, current_time)
         
         if should_fire:
-            # Log the fire
-            if hasattr(self, 'logger') and self.logger:
-                risk_score = None
-                if self.active_model == 'logistic':
-                    risk_score = self.models['logistic'].get_risk_score(features)
-                self.logger.log_cqs_fire(current_time, self.active_model, features, risk_score)
+            # Only fire the signal if not already active or pending
+            # This prevents duplicate logging while debouncing activation
+            will_actually_fire = not (self.is_signal_active or (self._pending_activation and current_time <= self._pending_until))
             
-            # Fire the signal (this handles activation/deactivation)
+            if will_actually_fire:
+                # Log the fire only when signal will actually activate
+                if hasattr(self, 'logger') and self.logger:
+                    risk_score = None
+                    if self.active_model == 'logistic':
+                        risk_score = self.models['logistic'].get_risk_score(features)
+                    self.logger.log_cqs_fire(current_time, self.active_model, features, risk_score)
+            
+            # Fire the signal (this handles activation/deactivation with its own debouncing)
             self.fire_signal(current_time)
         
         self.stats['model_evaluations'] += 1

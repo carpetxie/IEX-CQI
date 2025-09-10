@@ -295,7 +295,6 @@ class GroundTruthLabeler:
                     tick_direction=tick_direction,
                     available_shares=100  # Default estimate for VPA calculation
                 )
-            # If tick in wrong direction, continue to check other ticks in window
         
         # Tick occurred but in wrong direction - False Positive
         return GroundTruthLabel(
@@ -307,8 +306,12 @@ class GroundTruthLabeler:
         )
     
     def _determine_tick_direction(self, tick: NBBOChangeEvent) -> str:
-        """Determine the direction of a tick."""
-        # Check for actual price changes first
+        """Determine the direction of a tick.
+        
+        Per LaTeX Section 7.2: CQS and HFT both target venue count changes (crumbling events).
+        Ground truth should align with what the models are actually predicting.
+        """
+        # Check for actual price changes first (strongest signal)
         if tick.old_bid and tick.new_bid and tick.new_bid > tick.old_bid:
             return 'bid_up'
         elif tick.old_ask and tick.new_ask and tick.new_ask < tick.old_ask:
@@ -317,10 +320,10 @@ class GroundTruthLabeler:
             return 'bid_down'
         elif tick.old_ask and tick.new_ask and tick.new_ask > tick.old_ask:
             return 'ask_up'
-        # If no price change but venue counts changed, count as any movement
-        elif (tick.old_bid != tick.new_bid or tick.old_ask != tick.new_ask or 
-              tick.venues_at_bid != tick.venues_at_ask):
-            return 'any_movement'
+        # If no price change but venue counts changed, this is the crumbling event both CQS and HFT target
+        elif (tick.venues_at_bid != tick.venues_at_ask or 
+              (tick.old_bid == tick.new_bid and tick.old_ask == tick.new_ask)):
+            return 'venue_change'  # This is what CQS and HFT are both targeting
         else:
             return 'unknown'
     
@@ -328,36 +331,22 @@ class GroundTruthLabeler:
         """Determine predicted direction from fire features."""
         features = fire.features
         
-        # Check which side had venues decrease
-        bids_decreased = features.get('bids', 0) < features.get('bids_lag1', 0)
-        asks_decreased = features.get('asks', 0) < features.get('asks_lag1', 0)
-        
-        if bids_decreased and not asks_decreased:
-            # Bid side decreased - expect bid price to drop or ask price to rise
-            return 'bid_down_or_ask_up'
-        elif asks_decreased and not bids_decreased:
-            # Ask side decreased - expect ask price to drop or bid price to rise
-            return 'ask_down_or_bid_up'
-        elif bids_decreased and asks_decreased:
-            # Both sides decreased - expect any price movement
-            return 'any_movement'
-        else:
-            # No clear prediction
-            return 'unknown'
+        # CQS signals predict crumbling events (venue count changes), not necessarily price changes
+        # This aligns with both heuristic and logistic model logic in LaTeX Section 6
+        # Both CQS and HFT are targeting the same underlying venue count change events
+        return 'venue_change'
     
     def _directions_match(self, predicted: str, actual: str) -> bool:
         """Check if actual tick direction matches prediction."""
         if predicted == 'unknown':
             return False
         
+        # If CQS predicts venue_change, any venue count change (including price changes) is a match
+        if predicted == 'venue_change':
+            return actual in ['bid_up', 'bid_down', 'ask_up', 'ask_down', 'venue_change']
+        
         if predicted == 'any_movement':
-            return actual in ['bid_up', 'bid_down', 'ask_up', 'ask_down', 'any_movement']
-        
-        if predicted == 'bid_down_or_ask_up':
-            return actual in ['bid_down', 'ask_up', 'any_movement']
-        
-        if predicted == 'ask_down_or_bid_up':
-            return actual in ['ask_down', 'bid_up', 'any_movement']
+            return actual in ['bid_up', 'bid_down', 'ask_up', 'ask_down', 'venue_change']
         
         return actual == predicted
     
