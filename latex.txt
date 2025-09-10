@@ -1,0 +1,466 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% INSTRUCTIONS FOR CURSOR AI ASSISTANT
+% GOAL: Implement the agent-based simulation described in this document.
+% METHOD: Follow the instructions in each "Part" sequentially. Do not move to the next part
+% until the current one is complete and verified. I will provide the necessary data files.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\geometry{a4paper, margin=1in}
+
+\title{An Agent-Based Simulation for Modeling the Economic Impact of the IEX Crumbling Quote Signal}
+\author{Jeffrey Xie\thanks{Dartmouth College} \and Praneel Patel\thanks{Ohio State University}}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 1: DATA PREPROCESSING AND MODEL CALIBRATION
+% Focus: Sections 3.1, 3.2, 3.4.
+% Your task is to write Python scripts to process a raw IEX DEEP file (`.pcap.gz`) and
+% generate the specific data files needed to calibrate the simulation's stochastic models.
+% Use the `iex-parser` library and its command-line tools for initial parsing.
+%
+% CHECKPOINT 1.1: IEX DEEP Data Parser with Atomic Event Bundling.
+% - Write a Python script `preprocess.py`.
+% - Use `iex-parser`'s `iex-to-json` tool as a first step to convert the raw PCAP file to a
+%   stream of JSON objects for better performance.
+% - Create a function `process_atomic_events(json_file_path)` that reads the JSON stream.
+% - This function must implement the logic described in Section 3.1:
+%   1. Read messages sequentially.
+%   2. Buffer messages (PLUs, Trade Reports) that share the same high-precision timestamp.
+%   3. Use the message `flags` (refer to the IEX DEEP specification) to identify the
+%      final message in an atomic bundle.
+%   4. Once an event-end flag is seen, yield the entire buffer (the "atomic bundle") as a
+%      single list of messages.
+% - This function will be the foundation for all subsequent steps.
+%
+% CHECKPOINT 1.2: Limit Order Book (LOB) Reconstruction.
+% - Create a class `OrderBook` that maintains the state of the IEX LOB (bids and asks).
+% - Write a script `reconstruct_book.py` that iterates through the atomic bundles from Checkpoint 1.1.
+% - For each bundle, update the `OrderBook` instance. Per Section 3.1, apply trades *before*
+%   applying the final price level updates in the bundle.
+% - After processing each bundle, record the new Best Bid and Offer (BBO) and the total size at the BBO.
+% - The output should be a time-series CSV `book_states.csv` with columns:
+%   [timestamp, best_bid_price, best_bid_size, best_ask_price, best_ask_size].
+%
+% CHECKPOINT 1.3: Extract Calibration Data for Stochastic Models.
+% - Using the `book_states.csv` and the original atomic bundles, generate the following files:
+%   1. `hawkes_depletions.csv`:
+%      - Identify all "near-side depletion events" (Section 3.2): best size decreases with no price improvement.
+%      - Columns: [timestamp, side ('B' or 'A'), is_trade (1 if a trade caused it, 0 otherwise)].
+%   2. `poisson_additions.csv`:
+%      - Identify all "best-size increases" (Section 3.4).
+%      - Columns: [timestamp, side ('B' or 'A')].
+%   3. `addition_size_histogram.json` and `depletion_size_histogram.json`:
+%      - Calculate the change in size for each addition/depletion event.
+%      - Store the frequencies of these size deltas in two separate JSON files.
+%
+% CHECKPOINT 1.4: Fit the Models.
+% - Write a script `calibrate_models.py`.
+% - Use `hawkes_depletions.csv` to fit the Hawkes process parameters ($\mu, \alpha, \beta$) for both bid and ask sides.
+%   Use a library like `tick` for Maximum Likelihood Estimation. Print the resulting parameters.
+% - Use `poisson_additions.csv` to estimate the rate $\lambda_{add}(t)$ for the inhomogeneous Poisson process.
+%   For now, a simple approach is to count events in 1-minute buckets and store this as a dictionary.
+% - At the end of Part 1, we will have all the parameters and distributions needed to drive the simulation.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Introduction and Objective}
+
+\subsection{Problem Context and Motivation}
+The decentralized structure of the U.S. equities market creates transient pricing discrepancies across its $\sim$16 exchanges. These moments can be exploited by high-frequency traders (HFTs) in a practice known as stale-quote arbitrage. This activity is particularly detrimental during ``crumbling quotes'': periods where near-side liquidity across exchanges rapidly evaporates. The National Best Bid and Offer (NBBO), however, does not fully reflect this evaporation process until the \textit{final} best quote disappears. Exchanges that peg orders to the NBBO remain blind to such crumbling events while fast traders with a birds-eye view of all exchanges can easily pick off slower trades. The Investors Exchange (IEX) developed the Crumbling Quote Signal (CQS) to identify these moments and shield resting pegged orders from adverse selection. In other words, the IEX protects liquidity providers from fast liquidity takers.\\
+
+\noindent We build a simulation framework to \textbf{quantify} the economic trade-offs of such protective signals in a controlled, reproducible environment.\\
+\noindent\rule{\textwidth}{0.4pt}
+\noindent\textit{*Note}: A common metaphor is the ``domino effect.'' Traders who observe multiple exchanges dropping their near-side quotes predict the final domino. While the image is tempting, it is subtly wrong: a domino falls because another domino hit it, i.e., purely endogenous. In reality, the pressure that knocks down near-side quotes is better modeled as an \textbf{exogenous strike}. We can imagine this as a ruler that hits many dominoes at roughly the same time. Natural deviations (angles, friction) explain the staggered collapse we observe. The right question is whether an observer, seeing several dominoes tilt, is justified in saying the quote is crumbling. We formalize this via state-dependent signals and clustered stress.\\
+\noindent\rule{\textwidth}{0.4pt}
+\subsection{Assumptions and Methodological Considerations}
+\begin{itemize}
+    \item \textbf{Data Realism Gap:} We calibrate to single-venue IEX DEEP feed semantics (Price Level Updates with event flags, Trade Reports, Directory data), but simulate a multi-venue market. This introduces a known domain shift for non-IEX venues. We treat other venues as controlled environments with plausibly parameterized latencies and display rules.
+
+    \item \textbf{Event Atomicity and Timing:} Book states are only updated on \textit{completed} atomic events (final PLU with event-end flag). Ground-truth ticks are defined on completed states, never on mid-update transients. The prediction window is fixed at 2\,ms after a fire.
+
+    \item \textbf{Algorithmic Trigger vs. Ground Truth:} Real-time firing uses our own state features (counts of venues at NBBO and short lags) and a firing threshold. Post-simulation ground truth labels (TP/FP/FN) strictly follow the 2\,ms tick rule on completed states.
+
+    \item \textbf{Stress is Exogenous and Clustered:} Near-side depletions (best size down without price improvement) follow a \textit{lean Hawkes process} with exponential kernel; this injects burstiness where crumbling actually lives. Liquidity \textit{additions} remain simple (inhomogeneous Poisson). The HFT is deterministic and latency-driven.
+
+    \item \textbf{Pegged-Only Protection:} CQS protects pegged interest. We parameterize the \textit{pegged fraction} $\phi$ of displayed best-side depth at IEX and only protect that bucket while the signal is on.
+
+    \item \textbf{Error Costs:} A fired signal has an \textbf{opportunity cost} to IEX (missed fees on foregone trades). A false positive is pure cost; a true positive trades off cost against prevented adverse selection. For investor protection, we take a false negative (missed protection) as more harmful than a false positive.
+
+    \item \textbf{Asymmetric Costs:} We hypothesize the economic burden is shifted toward HFTs under effective protection (consistent with the literature) and we aim to \textit{quantify} this asymmetry.
+
+    \item \textbf{Qualitative, Second-Order Benefits:} Outside scope but acknowledged: improved market quality, investor confidence, and alignment with IEX's ethos of fairness.
+\end{itemize}
+
+\subsection{Primary Objectives}
+\begin{enumerate}
+    \item \textbf{Build a Controlled Microstructure Laboratory:} A multi-venue, agent-based simulator that respects DEEP atomicity, realistic latency paths, and IEX’s inbound delay.
+
+    \item \textbf{Define Rigorous KPIs:} 
+    \begin{enumerate}
+        \item Value of Prevented Arbitrage (VPA)
+        \item Exchange Opportunity Cost (EOC)
+        \item HFT Arbitrage Profitability
+    \end{enumerate}
+
+    \item \textbf{Benchmark Signal Efficiency:} Compare (i) no signal, (ii) a heuristic, and (iii) a logistic risk-score model across thresholds.
+
+    \item \textbf{Identify the HFT Deterrence Threshold:} Plot HFT Profitability vs.\ EOC; the x-intercept (at a specific $\tau$) is the tipping point where the stale-quote strategy’s expected value crosses zero.
+
+    \item \textbf{Trace the Efficient Frontier:} Plot VPA vs.\ EOC across $\tau$ and identify the knee (maximum marginal protection per unit cost). Report robustness across latency dispersion, pegged fraction $\phi$, and Hawkes parameters.
+\end{enumerate}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 2: SIMULATION ARCHITECTURE AND CORE COMPONENTS
+% Focus: Section 2.
+% Your task is to set up the foundational classes for the event-driven simulation.
+%
+% CHECKPOINT 2.1: Event Engine.
+% - Create a class `Event` with attributes `timestamp` and `priority`.
+% - Create a main class `Simulator` that contains a priority queue (use Python's `heapq` module).
+% - The `Simulator` should have methods `schedule_event(event)` and `run()` which advances
+%   simulation time by popping events from the queue and processing them until the queue is empty
+%   or a max time is reached.
+%
+% CHECKPOINT 2.2: Market Environment.
+% - Create a class `LimitOrderBook` that can add, cancel, and match orders.
+% - Create a class `Exchange` with a name (e.g., 'IEX', 'A', 'B') and an instance of `LimitOrderBook`.
+%   The `Exchange` class should handle incoming orders and publish `MarketDataEvent`s when its state changes.
+% - The main `Simulator` class should contain three `Exchange` instances.
+%
+% CHECKPOINT 2.3: Latency Model.
+% - Create a `LatencyModel` class that stores the data and order path latencies between all agents and venues.
+%   ($L^{\mathrm{data}}_{v \rightarrow a}$ and $L^{\mathrm{ord}}_{a \rightarrow v}$).
+% - When an `Exchange` generates a `MarketDataEvent`, it should consult the `LatencyModel` to schedule
+%   the arrival of this data at each agent at `current_time + latency`.
+% - Implement the IEX inbound delay: add 350 microseconds to any order path latency targeting 'IEX'.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Simulation Architecture}
+The simulator is event-driven with a central time-ordered priority queue.
+
+\subsection{Core Components}
+\begin{itemize}
+    \item \textbf{Event Engine:} Advances the simulation clock by popping the next event and scheduling any consequent events. All arrival times are absolute; we avoid drift by using per-agent local clocks for data arrivals.
+
+    \item \textbf{Agents:} 
+    Institutional liquidity providers (LPs) that post-resting interest and an HFT arbitrageur that reacts deterministically to vulnerable states.
+
+    \item \textbf{Market Environment:} 
+    Three exchanges: ``Exchange A'', ``Exchange B'', and ``IEX''. Each maintains a limit order book (LOB) and a matching engine.
+\end{itemize}
+
+\subsection{Latency Model}
+We separate \textit{market-data} and \textit{order} paths:
+\begin{itemize}
+    \item $L^{\mathrm{data}}_{v \rightarrow a}$: one-way time for venue $v$’s state change to reach agent or venue $a$.
+    \item $L^{\mathrm{ord}}_{a \rightarrow v}$: one-way time for agent $a$’s order to arrive at venue $v$.
+\end{itemize}
+IEX applies a fixed inbound delay: $L^{\mathrm{ord}}_{a \rightarrow \mathrm{IEX}} \leftarrow L^{\mathrm{ord}}_{a \rightarrow \mathrm{IEX}} + 350\,\mu\mathrm{s}$. We study three dispersion regimes (narrow/medium/wide) for robustness. Market-data events are broadcast after $L^{\mathrm{data}}$; matching engines act immediately on local state.
+
+\section{Simulation Calibration}
+\subsection{Data and Book Semantics (DEEP)}
+We reconstruct IEX’s book from Price Level Updates (PLUs). Intermediate PLUs within an atomic bundle do not create observable states. We only recompute the IEX BBO on the \textit{final} PLU that closes the event. Trade Reports in the same atomic bundle are applied before the final BBO recompute. Directory data provides tick/lot sizes and status/auction flags; halts and auctions are excluded from calibration and evaluation.
+
+\subsection{Lean Hawkes for Near-Side Pressure}
+Crumbles are driven by bursts of near-side pressure. We model this with \textbf{two} univariate Hawkes processes: one on the bid side (sell pressure) and one on the ask side (buy pressure). For side $s \in \{B,A\}$,
+\[
+\lambda_s(t) \;=\; \mu_s \;+\; \alpha_s \sum_{t_k^s < t} e^{-\beta_s (t - t_k^s)}, \qquad n_s = \alpha_s/\beta_s < 1.
+\]
+\textbf{Calibration from DEEP (IEX-only):}
+\begin{enumerate}
+    \item Replay DEEP atomically. Each completed state change may produce a near-side depletion event: best size down on the near side with no price improvement.
+    \item Record the timestamps $\{t_k^B\}$ and $\{t_k^A\}$. For each, record whether the depletion coincided with a Trade Report at the best (mixture proportion $\rho_s$ of trade vs.\ cancel).
+    \item Fit $(\mu_s,\alpha_s,\beta_s)$ by maximum likelihood on a training period. Report branching ratio $n_s$ and half-life $t_{1/2,s} = \ln 2/\beta_s$. Validate by time-change residuals $\sim\mathrm{Exp}(1)$.
+\end{enumerate}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 3: EVENT GENERATORS AND AGENT BEHAVIOR
+% Focus: Sections 3.3, 3.4, 4.2.
+% Your task is to implement the logic that generates market events and defines how agents behave.
+%
+% CHECKPOINT 3.1: Hawkes Process Event Generator.
+% - Implement Ogata's thinning algorithm (Section 3.3) to generate event times for near-side depletions.
+% - This generator will use the calibrated Hawkes parameters ($\mu, \alpha, \beta$) from Part 1.
+% - When an event is generated, it should be scheduled in the `Simulator`'s event queue. The event
+%   will trigger a depletion on one of the exchanges (randomly pick a venue that is at the NBBO).
+%
+% CHECKPOINT 3.2: Poisson Process Event Generator.
+% - Implement a generator for an inhomogeneous Poisson process to model liquidity additions (Section 3.4).
+% - It will use the bucketed rates $\lambda_{add}(t)$ calibrated in Part 1.
+% - Generated events will trigger a liquidity addition on one of the exchanges.
+%
+% CHECKPOINT 3.3: Liquidity Provider (LP) Agent.
+% - Create a class `LPAgent`.
+% - The LP agent is passive. It is driven by the Poisson generator. When a liquidity addition event
+%   occurs, the LP agent creates and sends an order.
+% - Order size is drawn from the `addition_size_histogram.json` (Section 3.4).
+%
+% CHECKPOINT 3.4: High-Frequency Trader (HFT) Agent.
+% - Create a class `HFTAgent`. This is the most complex agent.
+% - It maintains its own view of the market based on the `MarketDataEvent`s it receives. This view can be stale.
+% - On every `MarketDataEvent`, it re-calculates state features (Section 5.2).
+% - Implement the HFT's deterministic trigger logic (Section 4.2.2): if its view of the market
+%   is a "vulnerable state" (e.g., one exchange is stale while others have moved), it sends an
+%   arbitrage order.
+% - The order targets the stale venue. Its arrival time accounts for reaction delay ($\delta_{react}$) and
+%   order path latency ($L^{ord}$) as per Section 4.2.2.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Ogata Thinning (Generation)}
+We simulate Hawkes arrivals via Ogata’s thinning. Maintain a decayed sum $S_s(t)=\sum_{t_k^s<t} e^{-\beta_s(t-t_k^s)}$ so $\lambda_s(t) = \mu_s+\alpha_s S_s(t)$. At current time $t$:
+\begin{enumerate}
+    \item Set a dominating rate $M \leftarrow \lambda_s(t)$ (it only decreases between events).
+    \item Draw $\Delta \sim \mathrm{Exp}(M)$ and move to $t' = t + \Delta$.
+    \item Update $S_s \leftarrow S_s e^{-\beta_s \Delta}$; accept the candidate with probability $\lambda_s(t')/M$. On acceptance, emit a near-side depletion event at $t'$ and set $S_s \leftarrow S_s + 1$.
+\end{enumerate}
+Each accepted event is typed as a trade or cancel with probabilities $(\rho_s, 1-\rho_s)$ from calibration.
+
+\subsection{LP Additions and Order Sizes}
+Liquidity \textit{additions} at the best are modeled as an inhomogeneous Poisson process with intraday variation. We estimate a baseline rate $\lambda_{\mathrm{add}}(t)$ by counting completed best-size \textit{increases} per time bucket in DEEP. Add sizes are drawn from the empirical histogram of positive best-size deltas (rounded to the directory’s lot size). For depletions, realized sizes are drawn from the empirical histogram of negative best-size deltas and truncated at available shares.
+
+\subsection{What is Deterministic}
+The HFT does not arrive via a stochastic clock. It reacts deterministically to state, subject to observation latency and reaction delay. The deterministic policy is what we benchmark.
+
+\section{Component Specifications}
+\subsection{Market Environment}
+\begin{itemize}
+    \item \textbf{Exchanges ($N=3$):} ``Exchange A'', ``Exchange B'', and ``IEX''. Each maintains a LOB with two price-indexed queues (bid/ask).
+    \item \textbf{Pegged vs.\ Non-Pegged Buckets:} At the best price on IEX, depth is partitioned by a parameter $\phi \in [0,1]$ into pegged and non-pegged shares. Only pegged shares are protected when the signal is on.
+    \item \textbf{Market Data Dissemination:} A completed local state change at venue $v$ triggers MarketDataEvents to all recipients $a$ at $t + L^{\mathrm{data}}_{v \rightarrow a}$.
+    \item \textbf{NBBO:} Computed continuously from each venue’s \textit{local} BBO, which may be stale to different agents until they receive data.
+\end{itemize}
+
+\subsection{Agents}
+\subsubsection{Institutional Investor Agents (Liquidity Providers)}
+\begin{itemize}
+    \item \textbf{Behavior:} Passively replenish the best side. Arrival times follow an inhomogeneous Poisson process with rate $\lambda_{\mathrm{add}}(t)$.
+    \item \textbf{Order Details:} Size $\sim f_{\mathrm{add}}(s)$ (empirical). Price at the NBBO midpoint or at the best, consistent with tick rules.
+\end{itemize}
+
+\subsubsection{HFT Arbitrageur Agent (Liquidity Taker)}
+\begin{itemize}
+    \item \textbf{Observation and Trigger:} Continuously maintains state features (counts of venues at NBB/NBO; short lag snapshot). Computes a risk score $p(t)$ and fires when $p(t)>\tau$ or, under the heuristic model, when counts drop with price unchanged.
+    \item \textbf{Reaction Latency:} After observing a vulnerable state (arriving via $L^{\mathrm{data}}$), the HFT waits a fixed reaction delay $\delta_{\mathrm{react}}$ and routes to a target venue. Arrival time is $t_{\mathrm{arr}} = t_{\mathrm{obs}} + \delta_{\mathrm{react}} + L^{\mathrm{ord}}$.
+    \item \textbf{Venue Choice and Sizing:} Target the slowest stale venue that still quotes the outdated price, tie-breaking by displayed size. Order size is 
+    \[
+        \text{OrderSize} = \min(S_{\mathrm{visible,venue}}, \text{max\_fill\_size}).
+    \]
+    \item \textbf{Protection Logic:} If the target is IEX and the CQS is active at $t_{\mathrm{arr}}$, matching skips the pegged bucket; only non-pegged depth is eligible. A blocked attempt incurs a small cost $C_{\mathrm{attempt}}>0$ (routing/queue loss).
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 4: CQS MODELS AND PROTECTION LOGIC
+% Focus: Sections 5, 6.
+% Your task is to implement the Crumbling Quote Signal models and the protection mechanism on the IEX exchange.
+%
+% CHECKPOINT 4.1: Feature Calculation.
+% - In the `Simulator` (or a dedicated `SignalAgent` that has a global view), implement the real-time
+%   feature calculation logic described in Section 5.2.
+% - On every completed state change in the simulation's ground truth, compute:
+%   `bids`, `asks`, `bids_lag1`, `asks_lag1`. Maintain a short history for the lag features.
+%
+% CHECKPOINT 4.2: Implement the CQS Models.
+% - Model 1 (Control): This is the default behavior. No protection is ever active.
+% - Model 2 (Heuristic): Implement the firing rule from Section 6.2. If the condition is met,
+%   activate the IEX signal for 2ms.
+% - Model 3 (Logistic): Implement the risk score calculation from Section 6.3.2. If $p(t) > \tau$,
+%   activate the IEX signal for 2ms. The threshold $\tau$ should be a configurable parameter.
+%
+% CHECKPOINT 4.3: State Management and Matching Logic.
+% - Add a boolean state `is_signal_active` to the `IEX` Exchange class.
+% - When a CQS model fires, set this flag to TRUE and schedule a `SignalTurnOffEvent` for 2ms in the future.
+%   The handler for this event will set the flag back to FALSE.
+% - Modify the `IEX` matching engine. When an incoming order arrives, if `is_signal_active` is TRUE,
+%   it must only match against the non-pegged portion of liquidity. Implement the pegged vs.
+%   non-pegged buckets logic from Section 4.1 using the parameter $\phi$.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Data, Features, and State}
+\subsection{State Representation}
+At any time $t$, the ``IEX'' agent maintains:
+\begin{itemize}
+    \item Current NBBO $(B_t,A_t)$ computed from venue BBOs.
+    \item Sets of venues at the NBB and NBO: $E_{B_t}$ and $E_{A_t}$.
+    \item A short ring buffer of the last $K$ completed event states (for lag features), with timestamps.
+\end{itemize}
+
+\subsection{Real-Time Feature Calculation (Signal Features)}
+On each completed event:
+\begin{itemize}
+    \item \textbf{bids}: $|E_{B_t}|$, the number of venues at the NBB price.
+    \item \textbf{asks}: $|E_{A_t}|$, the number of venues at the NBO price.
+    \item \textbf{bids\_lag1}, \textbf{asks\_lag1}: the same counts from the most recent prior completed event (a $\sim$1\,ms lag in practice).
+    \item \textbf{spread\_bucket}: $\{1\text{-tick}, 2\text{-tick}, >2\text{-tick}\}$.
+\end{itemize}
+Features are computed only on completed states; no mid-update transients enter the model.
+
+\section{The Crumbling Quote Signal (CQS) Models}
+We evaluate three models.
+
+\subsection{Model 1: Control (No Signal)}
+No protection. Resting pegged and non-pegged orders are always available. This upper bounds HFT profit.
+
+\subsection{Model 2: Simple Heuristic Benchmark}
+A static, rule-based signal that fires immediately when the number of venues at the NBBO decreases without a price change:
+\[
+\textbf{Fire at } t \text{ if } |E_{B_t}| < |E_{B_{t-1}}| \land B_t = B_{t-1}\quad \text{or}\quad |E_{A_t}| < |E_{A_{t-1}}| \land A_t = A_{t-1}.
+\]
+When fired, set \texttt{is\_signal\_active} $=$ \texttt{TRUE} for 2\,ms.
+
+\subsection{Model 3: Logistic Risk-Score CQS}
+\subsubsection{Purpose}
+A state-dependent risk score that anticipates imminent ticks using compact features.
+
+\subsubsection{Logic}
+\begin{itemize}
+    \item \textbf{Score:} $p(t) = \sigma(z)$ with $z = c_0 + c_1\cdot\text{bids} + c_2\cdot\text{asks} + c_3\cdot\text{bids\_lag1} + c_4\cdot\text{asks\_lag1}$. 
+    \item \textbf{Firing:} If $p(t) > \tau$, activate protection for 2\,ms. We sweep $\tau \in \{0.15,0.3,0.45,0.6,0.75,0.9\}$.
+\end{itemize}
+\noindent\rule{\textwidth}{0.4pt}
+\noindent \textit{Note*:} We treat $p(t)$ as a \textbf{risk score}, not a calibrated probability. Coefficients are literature-inspired placeholders or fitted on a held-out DEEP replay for precision/recall balance. The scientific object here is the \textit{frontier} traced by $\tau$, not any single threshold.\vspace{0.25em}\\
+\noindent\rule{\textwidth}{0.4pt}
+
+\subsection{State Management and Matching Under Protection}
+\begin{itemize}
+    \item \textbf{Activation:} On fire at time $T$, set \texttt{is\_signal\_active} $\leftarrow$ \texttt{TRUE} on IEX and schedule a \texttt{SignalTurnOffEvent} at $T+2$\,ms.
+    \item \textbf{Pegged-Only Skip:} While active, IEX’s matcher fills against non-pegged shares only; pegged shares at the best are ineligible. If only pegged shares remain at the touch, incoming marketable orders receive zero fill.
+    \item \textbf{Deactivation:} At $T+2$\,ms, set \texttt{is\_signal\_active} $\leftarrow$ \texttt{FALSE}.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART 5: ANALYSIS AND EXPERIMENTATION FRAMEWORK
+% Focus: Sections 7, 8, 9, 10.
+% Your task is to implement the logging, metric calculation, and experimental harnesses
+% needed to run the simulation and produce the final results.
+%
+% CHECKPOINT 5.1: Logging and Ground Truth Labeling.
+% - Instrument the simulation to log key events: CQS fires, HFT arbitrage attempts (successful,
+%   blocked), and NBBO price changes ("ticks").
+% - After a simulation run, post-process the log file.
+% - Implement the ground truth labeling logic from Section 7.2. For every CQS fire, label it
+%   as a True Positive (TP) or False Positive (FP). Identify all False Negatives (FN).
+%
+% CHECKPOINT 5.2: Economic Metrics (KPIs).
+% - Implement functions to calculate the three KPIs from Section 8 based on the labeled log data:
+%   1. `calculate_vpa()`: Value of Prevented Arbitrage.
+%   2. `calculate_eoc()`: Exchange Opportunity Cost.
+%   3. `calculate_hft_pnl()`: HFT Arbitrage Profitability.
+%
+% CHECKPOINT 5.3: Experimental Harness.
+% - Create a main script `run_experiments.py`.
+% - This script should be able to run a full simulation for a given set of parameters.
+% - Implement the primary experiment (Section 9.1): loop through the different CQS models
+%   and sweep the firing threshold $\tau$ for Model 3. For each run, save the aggregate KPIs.
+% - Implement the secondary experiment (Section 9.2): create nested loops to sweep through
+%   the other parameters (latency, pegged fraction $\phi$, etc.).
+% - IMPORTANT: Use different random seeds for each run to ensure robust results. Run at least
+%   100 simulations for each parameter combination as specified.
+%
+% CHECKPOINT 5.4: Analysis and Plotting.
+% - Write a script `analyze_results.py` that reads the saved KPI data.
+% - Generate the plots described in Section 10:
+%   1. The Efficient Frontier (VPA vs. EOC).
+%   2. The HFT Tipping Point (HFT P&L vs. EOC).
+% - Generate the final benchmark table comparing the models.
+% - All plots must include 95% confidence bands calculated from the multiple random seeds.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Crumbling Quote Definition and Event Labeling}
+\subsection{Algorithmic Crumble}
+A crumble is a completed state change that reduces the count of venues at the NBBO without changing the NBBO price:
+\begin{align*}
+\text{Crumbling Bid:}\quad & |E_{B_t}| < |E_{B_{t-1}}| \text{ and } B_t = B_{t-1}.\\
+\text{Crumbling Ask:}\quad & |E_{A_t}| < |E_{A_{t-1}}| \text{ and } A_t = A_{t-1}.
+\end{align*}
+This directly informs the heuristic trigger and contributes to the risk score features.
+
+\subsection{Ground Truth Labels (2\,ms Rule)}
+For a fire at completed time $T$:
+\begin{itemize}
+    \item \textbf{TP}: The NBBO ticks in the predicted direction within $[T,\,T+2\text{ ms}]$ on the next completed state(s).
+    \item \textbf{FP}: No such tick within the window.
+    \item \textbf{FN}: A tick occurs within the window in the predicted direction but no fire was active.
+\end{itemize}
+Labels are evaluated only on completed states (final PLUs). Halts and auctions are excluded.
+
+\section{Economic Metrics (KPIs)}
+\subsection{Value of Prevented Arbitrage (VPA)}
+For each true positive (a protected stale trade),
+\begin{equation}
+VPA_{event} = |P_{\text{stale}} - P_{\text{true}}| \times \min\!\big(S_{\text{available}}, \text{max\_fill\_size}\big),
+\end{equation}
+where $P_{\text{stale}}$ is the stale price at the targeted venue, $P_{\text{true}}$ is the first corrected price after the tick, and $S_{\text{available}}$ is the visible shares at the stale price. Total VPA is the sum over events.
+
+\subsection{Exchange Opportunity Cost (EOC)}
+For each missed trade (TP or FP),
+\begin{equation}
+EOC_{event} = V_{\text{missed}} \times F_{\text{exchange}},
+\end{equation}
+where $V_{\text{missed}} = \min(\text{incoming size},\, \text{protected pegged size})$ during the on-window and $F_{\text{exchange}}$ is the per-share fee. Total EOC sums over events. We report both \$ and bps of mid.
+
+\subsection{HFT Arbitrage Profitability}
+The HFT’s net profit is
+\begin{equation}
+\text{P\&L} = \sum_{\text{wins on FNs}} VPA_{event} \;-\; \sum_{\text{blocked TPs}} C_{\text{attempt}},
+\end{equation}
+with $C_{\text{attempt}}>0$ a small constant (routing/queue loss). Attempt cost is varied in sensitivity analysis.
+
+\noindent\rule{\textwidth}{0.4pt}
+\noindent\textit{*Note:} The payoff is asymmetric by construction: unprotected stale fills can be multiple ticks, while a blocked attempt typically costs little. We \textit{choose} a conservative $C_{\text{attempt}}$ and show robustness.
+\noindent\rule{\textwidth}{0.4pt}
+
+\section{Experimental Design}
+\subsection{Primary Experiment: Model Comparison}
+\begin{itemize}
+    \item \textbf{Independent Variable:} Firing threshold $\tau$ (Model 3).
+    \item \textbf{Procedure:} For each model and each $\tau$ (grid from 0.1 to 0.9), run the simulator for a fixed horizon and record VPA, EOC, and HFT P\&L.
+    \item \textbf{Dependent Variables:} Aggregate VPA, EOC, HFT P\&L; also precision/recall and time-to-tick CDFs for diagnostics.
+\end{itemize}
+
+\subsection{Secondary Experiment: Sensitivity Analysis}
+We repeat the experiment under parameter sweeps:
+\begin{itemize}
+    \item Exchange fee $F_{\text{exchange}}$.
+    \item Signal on-window (1\,ms, 2\,ms, 5\,ms).
+    \item Attempt cost $C_{\text{attempt}}$.
+    \item Pegged fraction $\phi \in \{0.2,0.4,0.6\}$.
+    \item Latency dispersion (narrow/medium/wide).
+    \item Hawkes branching ratio $n_s$ and half-life $t_{1/2,s}$ (±20\% about calibrated values).
+    \item HFT reaction delay $\delta_{\mathrm{react}}$.
+\end{itemize}
+All results are averaged over $\ge 100$ random seeds (latency and Hawkes paths) with 95\% confidence bands.
+
+\section{Analysis and Deliverables}
+\begin{enumerate}
+\item \textbf{Efficient Frontier:} Scatter of VPA vs.\ EOC across $\tau$, with discrete derivative $\Delta VPA/\Delta EOC$ to identify the knee (operationally efficient setting).
+
+\item \textbf{HFT Tipping Point:} HFT P\&L vs.\ EOC; report the x-intercept and its $\tau$ at which expected profit crosses zero.
+
+\item \textbf{Benchmark Table:} Summarize VPA, EOC, and HFT P\&L for (i) Control, (ii) Heuristic, and (iii) CQS at the chosen $\tau$.
+\end{enumerate}
+We emphasize shapes and comparative statics, not point estimates. Results are reported in \$ and bps for scale stability.
+
+\section{Software Engineering and Reproducibility}
+We provide a deterministic replay of DEEP to verify book reconstruction (event-flag atomicity), unit tests for labeler timing (2\,ms window), and fixed-seed harnesses for the simulator. The code exposes:
+\begin{itemize}
+    \item A modular latency layer (data vs.\ order paths; IEX inbound delay).
+    \item Hawkes calibration and Ogata thinning implementation.
+    \item Matching with pegged/non-pegged buckets and protection gating.
+    \item A dashboard to sweep $\tau$ and parameters, with live KPIs and a persistent run ledger.
+\end{itemize}
+All plots include confidence bands; all experiments are scripted end-to-end with configuration snapshots.
+
+\end{document}

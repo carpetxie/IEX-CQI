@@ -243,7 +243,8 @@ class Exchange:
         self.simulator.register_handler("signal_activation", self.handle_signal_activation)
         self.simulator.register_handler("signal_deactivation", self.handle_signal_deactivation)
         self.simulator.register_handler("depletion_event", self.handle_depletion_event)
-        self.simulator.register_handler("addition_event", self.handle_addition_event)
+        # Remove addition_event handler - let LPAgents handle these to avoid double-addition
+        # self.simulator.register_handler("addition_event", self.handle_addition_event)
         
         # print(f"Exchange {self.name} registered handlers for depletion_event and addition_event")
     
@@ -263,17 +264,34 @@ class Exchange:
         # Use smaller sizes for more realistic market dynamics
         base_price = Decimal('150.00')  # Starting price
         
-        # Add bid orders (very small sizes for rapid crumbling)
-        order_book.add_order('B', base_price, 100, is_pegged=False)
-        order_book.add_order('B', base_price - Decimal('0.01'), 80, is_pegged=True)
-        order_book.add_order('B', base_price - Decimal('0.02'), 60, is_pegged=False)
-        order_book.add_order('B', base_price - Decimal('0.03'), 40, is_pegged=True)
-        
-        # Add ask orders (very small sizes for rapid crumbling)
-        order_book.add_order('A', base_price + Decimal('0.01'), 90, is_pegged=False)
-        order_book.add_order('A', base_price + Decimal('0.02'), 70, is_pegged=True)
-        order_book.add_order('A', base_price + Decimal('0.03'), 50, is_pegged=False)
-        order_book.add_order('A', base_price + Decimal('0.04'), 30, is_pegged=True)
+        # For IEX, enforce pegged fraction φ at the best prices
+        if self.name == "IEX":
+            total_best_size = 200  # Total size at best
+            pegged_size = int(total_best_size * order_book.pegged_fraction)
+            non_pegged_size = total_best_size - pegged_size
+            
+            # Add bid orders with proper φ allocation at best
+            order_book.add_order('B', base_price, non_pegged_size, is_pegged=False)
+            order_book.add_order('B', base_price, pegged_size, is_pegged=True)
+            order_book.add_order('B', base_price - Decimal('0.01'), 80, is_pegged=False)
+            order_book.add_order('B', base_price - Decimal('0.02'), 60, is_pegged=True)
+            
+            # Add ask orders with proper φ allocation at best
+            order_book.add_order('A', base_price + Decimal('0.01'), non_pegged_size, is_pegged=False)
+            order_book.add_order('A', base_price + Decimal('0.01'), pegged_size, is_pegged=True)
+            order_book.add_order('A', base_price + Decimal('0.02'), 70, is_pegged=False)
+            order_book.add_order('A', base_price + Decimal('0.03'), 50, is_pegged=True)
+        else:
+            # Non-IEX exchanges don't have pegged orders
+            order_book.add_order('B', base_price, 100, is_pegged=False)
+            order_book.add_order('B', base_price - Decimal('0.01'), 80, is_pegged=False)
+            order_book.add_order('B', base_price - Decimal('0.02'), 60, is_pegged=False)
+            order_book.add_order('B', base_price - Decimal('0.03'), 40, is_pegged=False)
+            
+            order_book.add_order('A', base_price + Decimal('0.01'), 90, is_pegged=False)
+            order_book.add_order('A', base_price + Decimal('0.02'), 70, is_pegged=False)
+            order_book.add_order('A', base_price + Decimal('0.03'), 50, is_pegged=False)
+            order_book.add_order('A', base_price + Decimal('0.04'), 30, is_pegged=False)
         
         # Publish initial market data
         self.publish_market_data({
@@ -338,7 +356,22 @@ class Exchange:
             # If this was an HFT arbitrage order, log success/blocked
             if order.get('is_arbitrage') and agent_id:
                 success = filled_size > 0
+                
+                # Calculate actual P&L based on arbitrage opportunity
                 pnl = 0.0
+                if success:
+                    # Use expected profit from HFT agent if available
+                    expected_profit_per_share = order.get('expected_profit_per_share', 0.01)
+                    
+                    # Add some market impact and execution costs
+                    execution_cost_per_share = 0.002  # 0.2 cents execution cost
+                    net_profit_per_share = expected_profit_per_share - execution_cost_per_share
+                    
+                    pnl = max(0, net_profit_per_share * filled_size)  # Can't have negative P&L on successful arbitrage
+                else:
+                    # Failed arbitrage attempt has small cost (routing, queue loss)
+                    pnl = -0.01  # Small cost per attempt
+                
                 event_data = {
                     'agent_id': agent_id,
                     'symbol': symbol,

@@ -285,16 +285,17 @@ class GroundTruthLabeler:
         
         for tick in relevant_ticks:
             tick_direction = self._determine_tick_direction(tick)
-            # For now, accept any tick in the window as TP to get VPA variation
-            # TODO: Make this more strict per LaTeX specification
-            return GroundTruthLabel(
-                fire_timestamp=fire.timestamp,
-                model=fire.model,
-                label='TP',
-                tick_timestamp=tick.timestamp,
-                tick_direction=tick_direction,
-                available_shares=100  # Default estimate for VPA calculation
-            )
+            # Check if tick direction matches predicted direction per LaTeX specification
+            if self._directions_match(predicted_direction, tick_direction):
+                return GroundTruthLabel(
+                    fire_timestamp=fire.timestamp,
+                    model=fire.model,
+                    label='TP',
+                    tick_timestamp=tick.timestamp,
+                    tick_direction=tick_direction,
+                    available_shares=100  # Default estimate for VPA calculation
+                )
+            # If tick in wrong direction, continue to check other ticks in window
         
         # Tick occurred but in wrong direction - False Positive
         return GroundTruthLabel(

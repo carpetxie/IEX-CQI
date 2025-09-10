@@ -62,9 +62,18 @@ class LPAgent:
     
     def handle_addition_event(self, event):
         """Handle liquidity addition events."""
+        data = event.data
+        target_exchange = data.get('target_exchange')
+        
+        # Only handle if this event is targeting one of our exchanges
+        # Check if target_exchange matches any of our exchange names
+        our_exchanges = [ex.name for ex in self.exchanges]
+        if target_exchange not in our_exchanges:
+            return
+        
         # LP agents respond to addition events by adding liquidity
-        # Draw size from distribution
-        size = random.choice(self.size_distribution) if self.size_distribution else 100
+        # Use the size from the event data, or draw from distribution
+        size = data.get('size') or (random.choice(self.size_distribution) if self.size_distribution else 100)
         
         # Select a random symbol to add liquidity to
         symbols = list(self.market_views.keys())
@@ -76,7 +85,7 @@ class LPAgent:
         else:
             symbol = random.choice(symbols)
         
-        self._add_liquidity(symbol, size)
+        self._add_liquidity(symbol, size, target_exchange)
     
     def handle_market_data(self, event):
         """Handle market data updates."""
@@ -98,7 +107,7 @@ class LPAgent:
                 'timestamp': event.timestamp
             }
     
-    def _add_liquidity(self, symbol: str, size: int):
+    def _add_liquidity(self, symbol: str, size: int, target_exchange: str = None):
         """Add liquidity for a specific symbol."""
         if symbol not in self.market_views:
             return
@@ -121,21 +130,28 @@ class LPAgent:
             # Add ask liquidity at or above current best ask
             price = ask_price + random.uniform(0, 0.01)  # Slightly above best ask
         
-        # Select target exchange (prefer IEX for now)
-        target_exchange = "IEX"
+        # Use specified target exchange or default to IEX
+        if not target_exchange:
+            target_exchange = "IEX"
         
         # Calculate order arrival time with latency
         latency = self.latency_model.get_order_latency(self.agent_id, target_exchange)
         arrival_time = self.simulator.get_current_time() + latency
         
         # Create order
+        # For IEX, respect pegged fraction φ; for other exchanges, no pegged orders
+        if target_exchange == "IEX":
+            is_pegged = random.random() < 0.4  # Default φ = 40% pegged
+        else:
+            is_pegged = False  # Non-IEX exchanges don't have pegged orders
+        
         order = {
             'action': 'add',
             'symbol': symbol,
             'side': side,
             'price': float(price),
             'size': size,
-            'is_pegged': random.random() < 0.5,  # 50% chance of being pegged
+            'is_pegged': is_pegged,
             'venue': target_exchange
         }
         
@@ -385,6 +401,16 @@ class HFTAgent:
         latency = self.latency_model.get_order_latency(self.agent_id, stale_venue)
         arrival_time = reaction_time + latency
         
+        # Calculate expected arbitrage profit for better P&L tracking
+        if side == 'B':
+            # Buying at stale bid, will sell at higher ask
+            true_ask = current_features.get('nbo')
+            expected_profit_per_share = (true_ask - target_price) if (true_ask and target_price < true_ask) else 0.01
+        else:
+            # Selling at stale ask, will buy at lower bid  
+            true_bid = current_features.get('nbb')
+            expected_profit_per_share = (target_price - true_bid) if (true_bid and target_price > true_bid) else 0.01
+        
         # Create arbitrage order
         order = {
             'action': 'match',
@@ -394,7 +420,8 @@ class HFTAgent:
             'size': order_size,
             'is_arbitrage': True,
             'venue': stale_venue,
-            'agent_id': self.agent_id
+            'agent_id': self.agent_id,
+            'expected_profit_per_share': expected_profit_per_share
         }
         
         # Schedule order event

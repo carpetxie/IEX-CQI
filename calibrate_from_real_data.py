@@ -79,7 +79,9 @@ def calibrate_from_real_data(pcap_file: str, sample_rate: int = 1, max_bundles: 
                     order_book.add_order(side, price, size)
                     
                     # Check if this is the final message in bundle (flags indicate completion)
-                    if flags == 1:  # Event end flag
+                    # Per LaTeX Section 3.1: Use message flags to identify the final message in an atomic bundle
+                    is_event_end = (flags & 0x1) != 0  # Check if event-end flag is set
+                    if is_event_end:  # Event end flag
                         # Record book state
                         bbo = order_book.get_best_bid_offer()
                         if bbo[0] is not None and bbo[2] is not None:  # Valid BBO

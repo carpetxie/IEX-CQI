@@ -82,7 +82,10 @@ def reconstruct_book_states(pcap_file_path: str, output_file: str = "book_states
                         trades.append(message)
                     elif message['type'] == 'price_level_update':
                         flags = message.get('flags', 0)
-                        if flags == 1:  # Event end flag - this is the final PLU
+                        # Per LaTeX Section 3.1: Use message flags to identify the final message in an atomic bundle
+                        # According to IEX DEEP spec, bit 0 (LSB) indicates "event end"
+                        is_event_end = (flags & 0x1) != 0  # Check if event-end flag is set
+                        if is_event_end:  # Event end flag - this is the final PLU
                             final_plu = message
                         else:
                             plus.append(message)
