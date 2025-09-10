@@ -1,0 +1,16 @@
+# IEX CQS Simulation Dependencies
+# Authors: Jeffrey Xie (Dartmouth College), Praneel Patel (Ohio State University)
+
+# Core scientific computing
+numpy>=1.21.0
+pandas>=1.3.0
+matplotlib>=3.4.0
+
+# IEX data parsing
+iex-parser>=1.0.0
+
+# Standard library modules used (no installation required):
+# - json, csv, gzip, subprocess, os, pathlib
+# - datetime, timedelta, time
+# - typing, dataclasses, collections, enum
+# - decimal, random, heapq

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-CQS Models and Protection Logic
-Implements Section 5 and 6 from the LaTeX specification
+IEX CQS Simulation: Crumbling Quote Signal Models
+
+Implements the three CQS models (Control, Heuristic, Logistic) and 
+signal processing logic for market protection.
+
+Authors: Jeffrey Xie (Dartmouth College), Praneel Patel (Ohio State University)
+Paper: "An Agent-Based Simulation for Modeling the Economic Impact 
+       of the IEX Crumbling Quote Signal"
 """
 
 import numpy as np

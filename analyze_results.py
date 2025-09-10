@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-Analysis and Plotting Script
-Implements Section 10 from the LaTeX specification
+IEX CQS Simulation: Results Analysis and Visualization
+
+Generates plots and analysis for CQS model comparison including
+efficient frontier, HFT tipping point, and sensitivity analysis.
+
+Authors: Jeffrey Xie (Dartmouth College), Praneel Patel (Ohio State University)
+Paper: "An Agent-Based Simulation for Modeling the Economic Impact 
+       of the IEX Crumbling Quote Signal"
 """
 
 import json

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-Experimental Harness
-Implements Section 9 from the LaTeX specification
+IEX CQS Simulation: Experimental Framework
+
+This module implements the experimental framework for comparing different 
+Crumbling Quote Signal (CQS) models and analyzing their economic impact.
+
+Authors: Jeffrey Xie (Dartmouth College), Praneel Patel (Ohio State University)
+Paper: "An Agent-Based Simulation for Modeling the Economic Impact 
+       of the IEX Crumbling Quote Signal"
 """
 
 import json
