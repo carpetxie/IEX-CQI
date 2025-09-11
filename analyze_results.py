@@ -271,6 +271,7 @@ class ResultsAnalyzer:
         Generate benchmark table comparing models.
         
         Creates a summary table with VPA, EOC, and HFT P&L for each model.
+        For logistic model, shows results for each threshold separately.
         """
         if not self.primary_data:
             print("No primary experiment data loaded")
@@ -283,33 +284,73 @@ class ResultsAnalyzer:
             if not model_data:
                 continue
             
-            # Extract metrics
-            vpa_values = [result['metrics']['vpa'] for result in model_data]
-            eoc_values = [result['metrics']['eoc'] for result in model_data]
-            hft_pnl_values = [result['metrics']['hft_pnl'] for result in model_data]
-            precision_values = [result['metrics']['precision'] for result in model_data]
-            recall_values = [result['metrics']['recall'] for result in model_data]
-            f1_values = [result['metrics']['f1_score'] for result in model_data]
-            
-            # Calculate statistics
-            stats = {
-                'model': model_name,
-                'num_runs': len(model_data),
-                'vpa_mean': np.mean(vpa_values),
-                'vpa_std': np.std(vpa_values),
-                'eoc_mean': np.mean(eoc_values),
-                'eoc_std': np.std(eoc_values),
-                'hft_pnl_mean': np.mean(hft_pnl_values),
-                'hft_pnl_std': np.std(hft_pnl_values),
-                'precision_mean': np.mean(precision_values),
-                'precision_std': np.std(precision_values),
-                'recall_mean': np.mean(recall_values),
-                'recall_std': np.std(recall_values),
-                'f1_mean': np.mean(f1_values),
-                'f1_std': np.std(f1_values)
-            }
-            
-            benchmark_data.append(stats)
+            if model_name == 'logistic':
+                # Group logistic results by threshold
+                from collections import defaultdict
+                threshold_groups = defaultdict(list)
+                
+                for result in model_data:
+                    threshold = result.get('threshold', 0.5)
+                    threshold_groups[threshold].append(result['metrics'])
+                
+                # Calculate stats for each threshold
+                for threshold in sorted(threshold_groups.keys()):
+                    metrics_list = threshold_groups[threshold]
+                    
+                    vpa_values = [m['vpa'] for m in metrics_list]
+                    eoc_values = [m['eoc'] for m in metrics_list]
+                    hft_pnl_values = [m['hft_pnl'] for m in metrics_list]
+                    precision_values = [m['precision'] for m in metrics_list]
+                    recall_values = [m['recall'] for m in metrics_list]
+                    f1_values = [m['f1_score'] for m in metrics_list]
+                    
+                    stats = {
+                        'model': f'logistic_t{threshold}',
+                        'threshold': threshold,
+                        'num_runs': len(metrics_list),
+                        'vpa_mean': np.mean(vpa_values),
+                        'vpa_std': np.std(vpa_values),
+                        'eoc_mean': np.mean(eoc_values),
+                        'eoc_std': np.std(eoc_values),
+                        'hft_pnl_mean': np.mean(hft_pnl_values),
+                        'hft_pnl_std': np.std(hft_pnl_values),
+                        'precision_mean': np.mean(precision_values),
+                        'precision_std': np.std(precision_values),
+                        'recall_mean': np.mean(recall_values),
+                        'recall_std': np.std(recall_values),
+                        'f1_mean': np.mean(f1_values),
+                        'f1_std': np.std(f1_values)
+                    }
+                    
+                    benchmark_data.append(stats)
+            else:
+                # Control and heuristic models (no threshold)
+                vpa_values = [result['metrics']['vpa'] for result in model_data]
+                eoc_values = [result['metrics']['eoc'] for result in model_data]
+                hft_pnl_values = [result['metrics']['hft_pnl'] for result in model_data]
+                precision_values = [result['metrics']['precision'] for result in model_data]
+                recall_values = [result['metrics']['recall'] for result in model_data]
+                f1_values = [result['metrics']['f1_score'] for result in model_data]
+                
+                stats = {
+                    'model': model_name,
+                    'threshold': None,
+                    'num_runs': len(model_data),
+                    'vpa_mean': np.mean(vpa_values),
+                    'vpa_std': np.std(vpa_values),
+                    'eoc_mean': np.mean(eoc_values),
+                    'eoc_std': np.std(eoc_values),
+                    'hft_pnl_mean': np.mean(hft_pnl_values),
+                    'hft_pnl_std': np.std(hft_pnl_values),
+                    'precision_mean': np.mean(precision_values),
+                    'precision_std': np.std(precision_values),
+                    'recall_mean': np.mean(recall_values),
+                    'recall_std': np.std(recall_values),
+                    'f1_mean': np.mean(f1_values),
+                    'f1_std': np.std(f1_values)
+                }
+                
+                benchmark_data.append(stats)
         
         # Create DataFrame
         df = pd.DataFrame(benchmark_data)
@@ -318,14 +359,15 @@ class ResultsAnalyzer:
         df.to_csv(f"{self.results_dir}/{output_file}", index=False)
         
         # Print formatted table
-        print("\n" + "=" * 80)
-        print("BENCHMARK TABLE")
-        print("=" * 80)
-        print(f"{'Model':<12} {'Runs':<6} {'VPA ($)':<12} {'EOC ($)':<12} {'HFT P&L ($)':<12} {'Precision':<10} {'Recall':<10} {'F1':<10}")
-        print("-" * 80)
+        print("\n" + "=" * 90)
+        print("BENCHMARK TABLE - SHOWING THRESHOLD SENSITIVITY")
+        print("=" * 90)
+        print(f"{'Model':<15} {'Threshold':<10} {'Runs':<6} {'VPA ($)':<12} {'EOC ($)':<12} {'HFT P&L ($)':<12} {'Precision':<10} {'Recall':<10} {'F1':<10}")
+        print("-" * 90)
         
         for _, row in df.iterrows():
-            print(f"{row['model']:<12} {row['num_runs']:<6} "
+            threshold_str = f"{row['threshold']:.2f}" if row['threshold'] is not None else "N/A"
+            print(f"{row['model']:<15} {threshold_str:<10} {row['num_runs']:<6} "
                   f"{row['vpa_mean']:<8.2f}±{row['vpa_std']:<3.2f} "
                   f"{row['eoc_mean']:<8.2f}±{row['eoc_std']:<3.2f} "
                   f"{row['hft_pnl_mean']:<8.2f}±{row['hft_pnl_std']:<3.2f} "
@@ -333,7 +375,7 @@ class ResultsAnalyzer:
                   f"{row['recall_mean']:<8.3f}±{row['recall_std']:<3.3f} "
                   f"{row['f1_mean']:<8.3f}±{row['f1_std']:<3.3f}")
         
-        print("=" * 80)
+        print("=" * 90)
         print(f"Benchmark table saved to {output_file}")
     
     def plot_sensitivity_analysis(self, output_file: str = "sensitivity_analysis.png"):
