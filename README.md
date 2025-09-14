@@ -152,5 +152,5 @@ MIT License - See LICENSE file for details.
 
 ## Contact
 
-- Jeffrey Xie: [email] (Dartmouth College)
-- Praneel Patel: [email] (Ohio State University)
+- Jeffrey Xie: jx.28@dartmouth.edu (Dartmouth College)
+- Praneel Patel: prapatel26@gmail.com (Ohio State University)
